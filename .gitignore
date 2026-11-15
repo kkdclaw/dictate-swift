@@ -1,0 +1,31 @@
+# сборка
+.build/
+build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+
+# macOS
+.DS_Store
+
+# личные данные — не для git
+terms.txt
+terms.d/
+auto_terms.txt
+commands.json
+config.json
+history.sqlite3
+voiceprint.*
+audio/
+*.wav
+*.aiff
+*.log
+
+# корпус и результаты замеров — личные
+CLAUDE.md
+.local.env
+corpus/
+out/
+*.jsonl
+manifest.json
+*.bin
