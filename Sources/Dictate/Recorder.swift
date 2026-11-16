@@ -1,10 +1,15 @@
 import AVFoundation
 import DictateCore
+import ObjCCatch
 
-/// Микрофон: поток открыт, пока диктовка включена (как в Python-версии — нажатие не ждёт открытия устройства),
+/// Микрофон: поток открыт на время записи (mic_mode on_demand) или пока диктовка включена (always),
 /// звук копится только между begin() и end(). Выход — 16 кГц моно float32.
 final class Recorder {
-    private let engine = AVAudioEngine()
+    /// AVAudioEngine запоминает формат входа при первом обращении к inputNode: сменилось устройство, пока
+    /// микрофон закрыт (AirPods 24 кГц ↔ встроенный 48 кГц), — installTap бросает исключение на каждом нажатии.
+    /// Поэтому движок пересоздаётся при смене входа и после неудачного открытия; иначе — тот же (0,1 мс против ~100).
+    private var engine = AVAudioEngine()
+    private var engineDevice = AudioObjectID(0)
     private var converter: AVAudioConverter?
     private let out = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
     private let lock = NSLock()
@@ -23,31 +28,65 @@ final class Recorder {
 
     func start() throws {
         guard !running else { return }
+        if Recorder.defaultInputID() != engineDevice { renewEngine() }
+        do { try open() } catch {
+            // формат входа устарел или устройство переключается (AirPods подключаются) — ещё раз с новым движком
+            log("Микрофон: не открылся (\(error.localizedDescription)) — пересоздаю поток")
+            stop()
+            renewEngine()
+            try open()
+        }
+    }
+
+    private func renewEngine() {
+        engine = AVAudioEngine()
+        engineDevice = Recorder.defaultInputID()
+    }
+
+    /// Текущий вход по умолчанию (0 — не узнали).
+    private static func defaultInputID() -> AudioObjectID {
+        var id = AudioObjectID(0)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
+        return id
+    }
+
+    private func open() throws {
         let input = engine.inputNode
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.sampleRate > 0, fmt.channelCount > 0 else {
             throw NSError(domain: "Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "нет входного аудиоустройства"])
         }
         converter = AVAudioConverter(from: fmt, to: out)
-        input.installTap(onBus: 0, bufferSize: 2048, format: fmt) { [weak self] buf, _ in self?.consume(buf) }
-        engine.prepare()
+        let engine = self.engine
+        try ObjCCatch.run {
+            input.installTap(onBus: 0, bufferSize: 2048, format: fmt) { [weak self] buf, _ in self?.consume(buf) }
+            engine.prepare()
+        }
         try engine.start()
         running = true
-        // смена входа (AirPods, док-станция): пересобрать поток
+        // смена входа во время работы потока (AirPods, док-станция): пересобрать поток
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine,
                                                           queue: .main) { [weak self] _ in
             guard let self else { return }
             log("Микрофон: конфигурация сменилась — переоткрываю поток")
-            self.stop(); try? self.start()
-            log("Микрофон: \(self.deviceName)")
+            self.stop()
+            do { try self.start(); log("Микрофон: \(self.deviceName)") } catch {
+                log("Микрофон: не переоткрылся — \(error.localizedDescription)")
+            }
         }
     }
 
     func stop() {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        let engine = self.engine
+        try? ObjCCatch.run {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
         running = false
     }
 

@@ -19,9 +19,11 @@ let package = Package(
                       checksum: "e57f8c48933000acabc13bb913fbe82805d483a2deff692cc6738836bd92393b"),
         // Логика без интерфейса: конфиг, словарь, чистка, история, хоткей, конвертер моделей.
         .target(name: "DictateCore", path: "Sources/DictateCore"),
+        // NSException → NSError: Swift их не ловит, а AVFoundation бросает (installTap при сменившемся входе).
+        .target(name: "ObjCCatch", path: "Sources/ObjCCatch", cSettings: [.unsafeFlags(["-fobjc-arc-exceptions"])]),
         // Приложение: меню-бар, хоткей, запись, распознавание, вставка.
         .executableTarget(name: "Dictate", dependencies: [
-            "DictateCore", "whisper",
+            "DictateCore", "whisper", "ObjCCatch",
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
             .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
             .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
