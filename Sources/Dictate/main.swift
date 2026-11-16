@@ -44,6 +44,12 @@ final class Controller {
     private var recApp = ""
     private var pressTime = Date()
     private var toggleMode = false
+    /// Запись идёт, а вход ещё отдаёт нули: сигнал «говорите» (звук, цветная капсула) отложен до onLive.
+    private var waitLive = false
+    /// Сколько после нажатия микрофон молчал нулями (с) — для строки «Диктовка:»; nil — был готов сразу.
+    private var recMicDelay: Double?
+    /// Отложенное закрытие микрофона после записи (тёплое окно mic_warm_sec).
+    private var micClose: DispatchWorkItem?
     static let tapMax = 0.35  // сек: короче — «тап» (запись до второго тапа), дольше — push-to-talk
     private var loadingModel = false
     private var askedPermissions = false
@@ -70,6 +76,7 @@ final class Controller {
             if let self, self.state == .recording, !self.toggleMode { self.cancelRecording("клавиша использована как модификатор") }
         }
         recorder.onLevel = { [weak self] rms in self?.hud.pushLevel(rms) }
+        recorder.onLive = { [weak self] in self?.micLive() }
         tap.onRelease = { [weak self] in self?.release() }
     }
 
@@ -172,13 +179,52 @@ final class Controller {
 
     func setMicOnDemand(_ on: Bool) {
         config.set("mic_mode", on ? "on_demand" : "always")
-        if on, recorder.running, state != .recording { recorder.stop() }
+        micClose?.cancel(); micClose = nil
+        if on, recorder.running, state != .recording, enrolling == nil { recorder.stop() }
         refresh()
+    }
+
+    /// Сколько держать микрофон открытым после записи в режиме on_demand (с; 0 — закрывать сразу).
+    /// У AirPods каждое открытие заново поднимает канал гарнитуры — 0,2–1,3 с нулей, начало фразы теряется;
+    /// серия диктовок с паузами короче окна идёт без этой потери. Цена — индикатор микрофона и режим
+    /// гарнитуры AirPods на время окна.
+    var micWarm: Double { (config.value("mic_warm_sec") as? Double) ?? Double(config.value("mic_warm_sec") as? Int ?? 60) }
+
+    func setMicWarm(_ sec: Double) {
+        config.set("mic_warm_sec", sec)
+        log(sec > 0 ? String(format: "Микрофон: держу открытым %.0f с после диктовки", sec) : "Микрофон: закрываю сразу после диктовки")
+        if micClose != nil { releaseMic() }  // окно уже идёт — пересчитать с новым сроком
+    }
+
+    /// Конец записи: в режиме on_demand микрофон закрывается не сразу, а после mic_warm_sec простоя.
+    private func releaseMic() {
+        guard micOnDemand else { return }
+        micClose?.cancel(); micClose = nil
+        let warm = micWarm
+        guard warm > 0, recorder.running else { if recorder.running { recorder.stop() }; return }
+        let w = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.micClose = nil
+            if self.state != .recording, self.enrolling == nil, self.recorder.running { self.recorder.stop() }
+        }
+        micClose = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + warm, execute: w)
+    }
+
+    /// Вход отдал первый звук: если запись ждала его — теперь сигнал «говорите».
+    private func micLive() {
+        guard waitLive else { return }
+        waitLive = false
+        guard state == .recording else { return }
+        recMicDelay = Date().timeIntervalSince(pressTime)
+        sound("start")
+        hud.setMode(.rec)
     }
 
     private func arm() {
         if micOnDemand {
-            if recorder.running && state != .recording { recorder.stop() }
+            // открыт вне записи — закрыть, если это не тёплое окно после диктовки и не запись отпечатка
+            if recorder.running && state != .recording && micClose == nil && enrolling == nil { recorder.stop() }
         } else if !recorder.running {
             do { try recorder.start(); log("Микрофон: \(recorder.deviceName)") } catch {
                 set(.error("микрофон: \(error.localizedDescription)")); return
@@ -196,6 +242,7 @@ final class Controller {
 
     private func disarm() {
         tap.stop()
+        micClose?.cancel(); micClose = nil
         if recorder.running { recorder.stop() }
     }
 
@@ -242,6 +289,7 @@ final class Controller {
         pressTime = Date(); toggleMode = false
         recApp = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
         review.close(cancelled: true)
+        micClose?.cancel(); micClose = nil
         recorder.begin()
         if !recorder.running {
             do { try recorder.start() } catch {
@@ -249,8 +297,16 @@ final class Controller {
                 sound("error"); return
             }
         }
-        sound("start")
-        hud.show(.rec)
+        recMicDelay = nil
+        if recorder.isLive {
+            waitLive = false
+            sound("start")
+            hud.show(.rec)
+        } else {
+            // вход ещё в нулях (AirPods поднимают канал гарнитуры) — серая капсула, звук начала — когда пойдёт звук
+            waitLive = true
+            hud.show(.wait)
+        }
         set(.recording)
     }
 
@@ -268,7 +324,8 @@ final class Controller {
     private func cancelRecording(_ reason: String) {
         guard state == .recording else { return }
         _ = recorder.end()
-        if micOnDemand { recorder.stop() }
+        waitLive = false
+        releaseMic()
         toggleMode = false
         hud.hide()
         set(.ready)
@@ -289,10 +346,19 @@ final class Controller {
         guard state == .recording else { return }
         toggleMode = false
         let audio = recorder.end()
-        if micOnDemand { recorder.stop() }
+        let micDead = waitLive
+        waitLive = false
+        releaseMic()
         set(.ready)
         let dur = Double(audio.count) / 16000
         guard dur >= Controller.minDuration else { hud.hide(); return }
+        if micDead {
+            log(String(format: "Диктовка: микрофон не успел включиться за %.1f с (%@) — говорить после звука начала; не ожил и дальше — проверьте вход",
+                       Date().timeIntervalSince(pressTime), recorder.deviceName))
+            sound("error"); hud.hide()
+            return
+        }
+        let micNote = recMicDelay.map { String(format: " · микрофон через %.2f с", $0) } ?? ""
         let peak = audio.reduce(Float(0)) { max($0, abs($1)) }
         if peak < Controller.silentPeak {
             log(String(format: "Диктовка: захват пустой (%.1f с, пик %.4f) — проверьте микрофон: %@", dur, peak, recorder.deviceName))
@@ -367,8 +433,8 @@ final class Controller {
             DispatchQueue.main.async {
                 self.busy -= 1; self.onChange()
                 if !cut.isEmpty { log("  ✂ вырезал галлюцинацию: \(cut.joined(separator: ", ").prefix(160))") }
-                log(String(format: "Диктовка: %.1f с звука · asr %.2f с · словарь:%@ · %@ · %d симв.",
-                           dur, r.ms / 1000, layer.isEmpty ? "общий" : layer, app, raw.count))
+                log(String(format: "Диктовка: %.1f с звука · asr %.2f с · словарь:%@ · %@ · %d симв.%@",
+                           dur, r.ms / 1000, layer.isEmpty ? "общий" : layer, app, raw.count, micNote))
                 if self.state != .recording { self.hud.hide() }  // новая запись уже идёт — её капсулу не трогаем
                 self.deliver(raw: raw, hint: hint, app: app, layer: layer, dur: dur, asrMs: r.ms, asrText: r.text, words: r.words, audio: audio)
             }
@@ -606,6 +672,7 @@ final class Controller {
     }
 
     private func beginEnroll(_ enroll: Bool, secs: Double) {
+        micClose?.cancel(); micClose = nil
         recorder.begin()
         if !recorder.running { do { try recorder.start() } catch { enrollWin.finish(ok: false, "Микрофон не открылся: \(error.localizedDescription)", again: "Попробовать снова"); return } }
         sound("start")
@@ -623,7 +690,7 @@ final class Controller {
         guard let e = enrolling else { return }
         e.timer.invalidate(); enrolling = nil
         let audio = recorder.end()
-        if micOnDemand { recorder.stop() }
+        releaseMic()
         if cancel { enrollWin.close(); log("Отпечаток: отменено"); return }
         enrollWin.busy()
         let mic = recorder.deviceName
@@ -893,8 +960,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             it.target = self; it.representedObject = p; return it
         }
         let pi = sub(ctl.missingPermissions.isEmpty ? "Разрешения: все выданы" : "Разрешения: не хватает \(ctl.missingPermissions.count)", perms)
-        return sub("Настройки", [hotkeyMenu(), mic, hudMenu(), soundsMenu(), clip, .separator(), ka, login, pi])
+        let micItems = ctl.micOnDemand ? [mic, micWarmMenu()] : [mic]
+        return sub("Настройки", [hotkeyMenu()] + micItems + [hudMenu(), soundsMenu(), clip, .separator(), ka, login, pi])
     }
+
+    static let warmChoices: [(Double, String)] = [(0, "Не держать — закрывать сразу"), (15, "15 с"), (30, "30 с"),
+                                                  (60, "1 мин"), (120, "2 мин"), (300, "5 мин")]
+
+    /// Тёплое окно микрофона: после диктовки вход не закрывается N секунд — следующая фраза серии не теряет
+    /// начало на подключении AirPods (канал гарнитуры поднимается 0,2–1,3 с).
+    func micWarmMenu() -> NSMenuItem {
+        let cur = ctl.micWarm
+        let items = AppDelegate.warmChoices.map { (s, t) -> NSMenuItem in
+            let it = NSMenuItem(title: t, action: #selector(setMicWarm(_:)), keyEquivalent: "")
+            it.target = self; it.representedObject = s; it.state = cur == s ? .on : .off
+            return it
+        }
+        let now = cur == 0 ? "нет" : AppDelegate.warmChoices.first { $0.0 == cur }?.1 ?? String(format: "%.0f с", cur)
+        return sub("Держать микрофон после диктовки: \(now)", items)
+    }
+    @objc func setMicWarm(_ s: NSMenuItem) { if let v = s.representedObject as? Double { ctl.setMicWarm(v) } }
 
     @objc func requestMissing() { ctl.requestMissingPermissions() }
     @objc func toggleSounds() { ctl.config.set("sounds", !ctl.config.sounds) }

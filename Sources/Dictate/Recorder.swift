@@ -21,6 +21,13 @@ final class Recorder {
     private(set) var level: Float = 0
     /// RMS каждого буфера во время записи — для капсулы (вызывается на главном потоке).
     var onLevel: ((Float) -> Void)?
+    /// Вход «ожил» — пришёл первый ненулевой отсчёт после открытия. У AirPods первые 0,2–1,3 с после открытия
+    /// macOS поднимает канал гарнитуры и подаёт цифровые нули: сказанное в это время потеряно, поэтому сигнал
+    /// «говорите» ждёт этого момента. Вызывается на главном потоке.
+    var onLive: (() -> Void)?
+    private var live = false
+    /// Вход уже отдаёт звук (не нули с момента открытия).
+    var isLive: Bool { lock.lock(); defer { lock.unlock() }; return live }
 
     var deviceName: String {
         AVCaptureDevice.default(for: .audio)?.localizedName ?? "?"
@@ -60,6 +67,7 @@ final class Recorder {
             throw NSError(domain: "Recorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "нет входного аудиоустройства"])
         }
         converter = AVAudioConverter(from: fmt, to: out)
+        lock.lock(); live = false; lock.unlock()
         let engine = self.engine
         try ObjCCatch.run {
             input.installTap(onBus: 0, bufferSize: 2048, format: fmt) { [weak self] buf, _ in self?.consume(buf) }
@@ -91,7 +99,15 @@ final class Recorder {
     }
 
     private func consume(_ buf: AVAudioPCMBuffer) {
-        lock.lock(); let rec = recording; lock.unlock()
+        lock.lock(); let rec = recording, wasLive = live; lock.unlock()
+        if !wasLive, let ch = buf.floatChannelData {
+            var any = false
+            for i in 0..<Int(buf.frameLength) where ch[0][i] != 0 { any = true; break }
+            if any {
+                lock.lock(); live = true; lock.unlock()
+                if let onLive { DispatchQueue.main.async { onLive() } }
+            }
+        }
         guard rec, let converter else { return }
         let ratio = out.sampleRate / buf.format.sampleRate
         let cap = AVAudioFrameCount(Double(buf.frameLength) * ratio + 32)

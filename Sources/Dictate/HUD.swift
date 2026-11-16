@@ -27,7 +27,8 @@ final class HUD {
     static let backgrounds: [(String, String)] = [("system", "Как в системе"), ("dark", "Тёмный"), ("light", "Светлый")]
     static let positions: [(String, String)] = [("caret", "У текстового курсора"), ("bottom", "Внизу экрана")]
 
-    enum Mode { case rec, busy }
+    /// wait — запись идёт, но вход ещё отдаёт нули (AirPods поднимают канал гарнитуры): значок серый, говорить рано.
+    enum Mode { case wait, rec, busy }
 
     let config: Config
     private var panel: NSPanel?
@@ -49,7 +50,7 @@ final class HUD {
     func show(_ m: Mode) {
         guard enabled else { return }
         mode = m
-        if m == .rec { levels.removeAll() }
+        if m == .rec || m == .wait { levels.removeAll() }
         ensurePanel()
         let size = HUD.sizes.first { $0.0 == config.string("hud_size", "small") }?.2 ?? HUD.sizes[1].2
         panel?.setFrame(targetFrame(size), display: true)
@@ -169,8 +170,11 @@ final class HUDView: NSView {
         if bg == "light" && key == "white" { accent = NSColor(calibratedWhite: 0.25, alpha: 1) }  // белый на светлом не виден
         let t = Date().timeIntervalSinceReferenceDate
         let tiny = h < 16
+        if mode == .wait {  // микрофон ещё не отдаёт звук — серый мерцающий значок вместо цветного
+            accent = NSColor(calibratedWhite: bg == "dark" ? 0.62 : 0.45, alpha: 0.45 + 0.35 * (0.5 + 0.5 * sin(t * 9)))
+        }
         switch mode {
-        case .rec:
+        case .rec, .wait:
             let level = CGFloat(hud.levels.last ?? 0)
             switch hud.config.string("hud_icon", "bars") {
             case "dot":
