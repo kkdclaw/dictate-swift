@@ -14,6 +14,7 @@ extension AppDelegate {
         case .loading(let what): return "Подождите: \(what)…"
         case .off: return "Диктовка выключена"
         case .paused: return "Пауза: диктует Python-версия"
+        case .noMic: return "⚠️ Нет микрофона — подключите USB-микрофон, гарнитуру или AirPods"
         case .error(let e): return "⚠️ \(e)"
         }
     }
@@ -47,7 +48,8 @@ extension AppDelegate {
             .init(label: "Пишем с", value: c.recorder.deviceName),
             .init(label: "Режим", value: c.micOnDemand ? "открывается только на время записи (индикатор не горит в простое)"
                   : "открыт всё время, пока диктовка включена", button: "Переключить", action: "mic_mode"),
-            .init(label: "Входы в системе", value: AppDelegate.inputDevices().joined(separator: ", ")),
+            .init(label: "Входы в системе", value: AppDelegate.inputDevices().isEmpty ? "ни одного — подключите микрофон"
+                  : AppDelegate.inputDevices().joined(separator: ", ")),
         ]
         let layers = c.terms.layers()
         let n = c.terms.load(layer: "", budget: 100_000, count: { _ in 1 }).split(separator: ",").count

@@ -6,7 +6,7 @@ import SwiftUI
 // MARK: - Диктовка: нажал → записал → распознал → вставил
 
 final class Controller {
-    enum State: Equatable { case loading(String), ready, recording, paused, off, error(String) }
+    enum State: Equatable { case loading(String), ready, recording, paused, off, noMic, error(String) }
 
     static let minDuration = 0.4   // сек: короче — случайное нажатие
     static let silentPeak: Float = 0.02  // говорил, а пик ниже — захват пустой (Python 0.17.2)
@@ -98,6 +98,14 @@ final class Controller {
             disarm()
             set(.error("нет разрешений: " + missingPermissions.map(\.title).joined(separator: ", ")))
             return
+        }
+        // входа нет (Mac mini, Mac Studio без гарнитуры) — ждём микрофон; хоткей живой и отвечает сигналом ошибки
+        if !Recorder.hasInput, state != .recording {
+            if state != .noMic { log("Микрофон: в системе нет ни одного входа — диктовка ждёт микрофон") }
+            micClose?.cancel(); micClose = nil
+            if recorder.running && enrolling == nil { recorder.stop() }
+            if !tap.active { _ = tap.start() }
+            set(.noMic); return
         }
         arm()
     }
@@ -284,6 +292,10 @@ final class Controller {
             // второй тап в toggle-режиме — стоп; в push-to-talk сюда попадаем, если отпускание потерялось
             if !toggleMode { log("  (отпускание не пришло — останавливаю по повторному нажатию)") }
             stopAndSubmit(); return
+        }
+        if state == .noMic {
+            log("Диктовка: нет микрофона — подключите вход (Настройки → Звук → Вход)")
+            sound("error"); return
         }
         guard state == .ready, enrolling == nil else { return }
         pressTime = Date(); toggleMode = false
@@ -668,7 +680,7 @@ final class Controller {
     }
 
     var stateText: String {
-        switch state { case .error(let e): e; case .loading(let w): w; case .off: "выключена"; case .paused: "пауза"; default: "занята" }
+        switch state { case .error(let e): e; case .loading(let w): w; case .off: "выключена"; case .paused: "пауза"; case .noMic: "нет микрофона"; default: "занята" }
     }
 
     private func beginEnroll(_ enroll: Bool, secs: Double) {
@@ -786,6 +798,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .off: s = "🌙"
         case .paused: s = "⏸"
         case .error: s = "❌"
+        case .noMic: s = "🎙️⚠️"
         case .ready: s = "🎙️"
         }
         item.button?.title = s
@@ -802,6 +815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 1. состояние
         menu.addItem(info(statusText))
         menu.addItem(info("\(asrName) · чистка \(cfg.enhance ? llmName : "выключена") · стиль в «\(app)»: \(Styles.short(cfg.style(for: app)))"))
+        menu.addItem(micMenu())
         let en = action("Диктовка включена", #selector(toggleEnabled)); en.state = cfg.enabled ? .on : .off
         menu.addItem(en)
         if !ctl.missingPermissions.isEmpty {
@@ -829,6 +843,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(action("Помощь", #selector(openHelp)))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Выход", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// Индикатор микрофона: какой вход пишет и открыт ли он сейчас (горит ли индикатор macOS); входа нет — предупреждение.
+    /// Список входов — для справки: выбирают их в Настройках macOS (Звук → Вход).
+    func micMenu() -> NSMenuItem {
+        let inputs = AppDelegate.inputDevices()
+        let settings = action("Настройки звука…", #selector(openSoundSettings))
+        guard Recorder.hasInput else {
+            return sub("⚠️ Микрофона нет — подключите USB-микрофон, гарнитуру или AirPods",
+                       [info(inputs.isEmpty ? "Входов в системе нет" : "Входы: " + inputs.joined(separator: ", ")), .separator(), settings])
+        }
+        let cur = ctl.recorder.deviceName
+        let items = inputs.map { n -> NSMenuItem in let it = info(n); it.state = n == cur ? .on : .off; return it }
+        return sub("Микрофон: \(cur)" + (ctl.recorder.running ? " · открыт" : ""), items + [.separator(), settings])
+    }
+    @objc func openSoundSettings() {
+        if let u = URL(string: "x-apple.systempreferences:com.apple.Sound-Settings.extension") { NSWorkspace.shared.open(u) }
     }
 
     func sub(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {

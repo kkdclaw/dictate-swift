@@ -29,12 +29,30 @@ final class Recorder {
     /// Вход уже отдаёт звук (не нули с момента открытия).
     var isLive: Bool { lock.lock(); defer { lock.unlock() }; return live }
 
+    /// Имя текущего входа; входа нет — «нет микрофона» (у Mac mini и Mac Studio своего микрофона нет).
     var deviceName: String {
-        AVCaptureDevice.default(for: .audio)?.localizedName ?? "?"
+        guard Recorder.hasInput else { return "нет микрофона" }
+        return AVCaptureDevice.default(for: .audio)?.localizedName ?? "?"
     }
+
+    /// В системе есть вход по умолчанию с входными потоками. Без входа macOS отдаёт id 0, а AVAudioEngine —
+    /// фиктивный формат «2 канала, 44,1 кГц», и открытие падает невнятным «format mismatch».
+    /// Это свойство CoreAudio: микрофон не открывает, индикатор macOS не зажигает — можно звать раз в 3 с.
+    static var hasInput: Bool {
+        let id = defaultInputID()
+        guard id != kAudioObjectUnknown else { return false }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams,
+                                              mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
+    }
+
+    static let noInput = NSError(domain: "Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey:
+        "нет микрофона — подключите USB-микрофон, гарнитуру или AirPods"])
 
     func start() throws {
         guard !running else { return }
+        guard Recorder.hasInput else { throw Recorder.noInput }
         if Recorder.defaultInputID() != engineDevice { renewEngine() }
         do { try open() } catch {
             // формат входа устарел или устройство переключается (AirPods подключаются) — ещё раз с новым движком
