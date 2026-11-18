@@ -778,6 +778,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updater = Updater(config: ctl.config)
         updater.isIdle = { [weak self] in self?.ctl.state != .recording && self?.ctl.busy == 0 }
         updater.startSchedule()  // GitHub Releases публичного репо — без токена
+        enableLoginOnce()
         updateIcon()
         if Permission.microphone.granted == false { Permission.microphone.request { self.ctl.refresh() } }
         ctl.refresh()
@@ -787,6 +788,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.ctl.refresh()
             self.ctl.llmIdleTick()
         }
+    }
+
+    /// Запуск при входе — один раз на машину включаем сами: без него после перезагрузки приложение не стартует
+    /// и не получает обновлений. Флаг login_item_auto в config — дальше галку в меню решает человек, не трогаем.
+    func enableLoginOnce() {
+        guard !ctl.config.bool("login_item_auto", false) else { return }
+        ctl.config.set("login_item_auto", true)
+        guard SMAppService.mainApp.status != .enabled else { return }
+        do { try SMAppService.mainApp.register(); log("Запуск при входе: включён (первый запуск на этой машине)") }
+        catch { log("Запуск при входе: не включился — \(error.localizedDescription)") }
     }
 
     func updateIcon() {
