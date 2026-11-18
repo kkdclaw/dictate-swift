@@ -5,7 +5,7 @@ import DictateCore
 /// Капсула-индикатор у текстового курсора — порт hud.py Python-версии, ключи config.json те же
 /// (hud, hud_size, hud_icon, hud_color, hud_bg, hud_pos). Панель без рамки поверх окон, не берёт фокус
 /// и мышь. «rec» — значок уровня в акцентном цвете, «busy» — три пульсирующие точки. Позиция — у каретки
-/// активного поля (Accessibility); поле не отдаёт координаты — внизу экрана с мышью.
+/// активного поля (Accessibility); каретка без координат — над самим полем; нет и поля — внизу экрана с мышью.
 final class HUD {
     static let colors: [(String, String, NSColor)] = [
         ("red", "Красный", NSColor(calibratedRed: 1.0, green: 0.27, blue: 0.23, alpha: 1)),
@@ -108,16 +108,29 @@ final class HUD {
                 if let v = AXValueCreate(.cfRange, &c) { values.append(v) }
             }
         }
+        // AX: начало — левый верх главного экрана, ось Y вниз
+        guard let primary = NSScreen.screens.first?.frame else { return nil }
+        func appKit(_ rc: CGRect) -> CGRect {
+            CGRect(x: rc.origin.x, y: primary.height - rc.origin.y - rc.height, width: max(2, rc.width), height: rc.height)
+        }
         for val in values {
             var bRef: CFTypeRef?
             guard AXUIElementCopyParameterizedAttributeValue(el, kAXBoundsForRangeParameterizedAttribute as CFString, val, &bRef) == .success,
                   let bRef, CFGetTypeID(bRef) == AXValueGetTypeID() else { continue }
             var rc = CGRect.zero
             if AXValueGetValue(bRef as! AXValue, .cgRect, &rc), rc.height > 0, rc.height <= 120, rc.width <= max(12, rc.height * 1.5) {
-                // AX: начало — левый верх главного экрана, ось Y вниз
-                guard let primary = NSScreen.screens.first?.frame else { return nil }
-                return CGRect(x: rc.origin.x, y: primary.height - rc.origin.y - rc.height, width: max(2, rc.width), height: rc.height)
+                return appKit(rc)
             }
+        }
+        // Каретка без координат: Chromium/Electron (Mattermost и др.) на пустом поле отдаёт прямоугольник
+        // нулевой высоты. Тогда — над самим полем, у левого края, где стоит курсор пустого поля.
+        // Поле выше 240 pt (редактор на всё окно) — не опора: капсула уйдёт вниз экрана, как раньше.
+        var fRef: CFTypeRef?
+        var f = CGRect.zero
+        if AXUIElementCopyAttributeValue(el, "AXFrame" as CFString, &fRef) == .success,
+           let fRef, CFGetTypeID(fRef) == AXValueGetTypeID(),
+           AXValueGetValue(fRef as! AXValue, .cgRect, &f), f.width >= 20, f.height >= 10, f.height <= 240 {
+            return appKit(CGRect(x: f.minX + 12, y: f.minY, width: 2, height: min(f.height, 60)))
         }
         return nil
     }
