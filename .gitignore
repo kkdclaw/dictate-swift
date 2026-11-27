@@ -15,7 +15,7 @@ auto_terms.txt
 commands.json
 config.json
 history.sqlite3
-voiceprint.*
+/voiceprint.*
 audio/
 *.wav
 *.aiff
@@ -29,3 +29,4 @@ out/
 *.jsonl
 manifest.json
 *.bin
+!/Resources/vad/*.bin
