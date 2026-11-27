@@ -37,13 +37,16 @@ final class HUD {
     private(set) var mode: Mode?
     var previewMode: Mode? { get { mode } set { mode = newValue } }  // для --hud-preview
     var levels: [Float] = []   // последние уровни (0…1), пишет запись
+    /// Программное усиление текущего входа (MicGain): с тихим микрофоном RMS × 12 даёт 0,07–0,13 — столбики
+    /// остаются точками. Ставится в начале каждой записи.
+    var gain: Float = 1
 
     init(config: Config) { self.config = config }
 
     var enabled: Bool { config.bool("hud", true) }
 
     func pushLevel(_ rms: Float) {
-        levels.append(min(1, rms * 12))
+        levels.append(min(1, rms * 12 * gain))
         if levels.count > 64 { levels.removeFirst(levels.count - 64) }
     }
 

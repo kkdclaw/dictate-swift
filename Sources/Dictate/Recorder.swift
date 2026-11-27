@@ -47,6 +47,19 @@ final class Recorder {
         return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
     }
 
+    /// Имя входа по умолчанию прямо из CoreAudio ("" — входа нет): два чтения свойства, можно звать на каждом
+    /// нажатии. Ключ выученного усиления (mic_gain_auto).
+    static var inputName: String {
+        let id = defaultInputID()
+        guard id != kAudioObjectUnknown else { return "" }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName,
+                                              mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var name: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name) == noErr, let name else { return "" }
+        return name.takeRetainedValue() as String
+    }
+
     static let noInput = NSError(domain: "Recorder", code: 2, userInfo: [NSLocalizedDescriptionKey:
         "нет микрофона — подключите USB-микрофон, гарнитуру или AirPods"])
 

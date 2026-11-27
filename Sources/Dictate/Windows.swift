@@ -48,6 +48,7 @@ extension AppDelegate {
             .init(label: "Пишем с", value: c.recorder.deviceName),
             .init(label: "Режим", value: c.micOnDemand ? "открывается только на время записи (индикатор не горит в простое)"
                   : "открыт всё время, пока диктовка включена", button: "Переключить", action: "mic_mode"),
+            .init(label: "Усиление", value: c.micGainTitle + " — программное: системный регулятор входа выше максимума не поднимает"),
             .init(label: "Входы в системе", value: AppDelegate.inputDevices().isEmpty ? "ни одного — подключите микрофон"
                   : AppDelegate.inputDevices().joined(separator: ", ")),
         ]

@@ -9,7 +9,6 @@ final class Controller {
     enum State: Equatable { case loading(String), ready, recording, paused, off, noMic, error(String) }
 
     static let minDuration = 0.4   // сек: короче — случайное нажатие
-    static let silentPeak: Float = 0.02  // говорил, а пик ниже — захват пустой (Python 0.17.2)
 
     let config: Config
     let terms: Terms
@@ -204,6 +203,44 @@ final class Controller {
         if micClose != nil { releaseMic() }  // окно уже идёт — пересчитать с новым сроком
     }
 
+    // MARK: программное усиление (MicGain)
+
+    /// Постоянный множитель из настроек (`mic_gain`); nil — авто.
+    var micGainFixed: Float? { MicGain.fixed(config.value("mic_gain")) }
+
+    /// Что выучено в авто-режиме по записям с речью: имя входа → усиление (`mic_gain_auto`).
+    private var micGainLearned: [String: Double] { config.value("mic_gain_auto") as? [String: Double] ?? [:] }
+
+    /// Усиление текущего входа для шкалы капсулы и строки меню: постоянное из настроек или выученное.
+    var micGainNow: Float { micGainFixed ?? Float(micGainLearned[Recorder.inputName] ?? 1) }
+
+    /// Для меню и окна «Состояние»: «авто», «авто (сейчас ×9)», «выключено», «×4».
+    var micGainTitle: String {
+        guard let fixed = micGainFixed else {
+            let now = micGainNow
+            return now > 1.05 ? "авто (сейчас \(MicGain.label(now)))" : "авто"
+        }
+        return fixed <= 1 ? "выключено" : MicGain.label(fixed)
+    }
+
+    func setMicGain(_ gain: Float?) {
+        config.set("mic_gain", gain.map { Double($0) as Any } ?? "auto")
+        log("Микрофон: усиление — " + (gain.map { $0 <= 1 ? "выключено" : MicGain.label($0) } ?? "авто"))
+    }
+
+    /// Авто-режим: запись с речью уточняет усиление входа. В config.json пишем только заметный сдвиг (> 10 %),
+    /// а не каждую диктовку; обычному микрофону (×1) запоминать нечего.
+    private func learnMicGain(_ gain: Float, input: String) {
+        guard !input.isEmpty else { return }
+        var all = micGainLearned
+        let old = all[input].map { Float($0) }
+        let new = MicGain.learn(old: old, recording: gain)
+        if let old { guard abs(new / old - 1) > 0.1 else { return } } else if new <= 1 { return }
+        all[input] = Double((new * 10).rounded() / 10)
+        config.set("mic_gain_auto", all)
+        log("Микрофон: \(input) — усиление для капсулы \(MicGain.label(new))")
+    }
+
     /// Конец записи: в режиме on_demand микрофон закрывается не сразу, а после mic_warm_sec простоя.
     private func releaseMic() {
         guard micOnDemand else { return }
@@ -310,6 +347,7 @@ final class Controller {
             }
         }
         recMicDelay = nil
+        hud.gain = micGainNow
         if recorder.isLive {
             waitLive = false
             sound("start")
@@ -357,12 +395,12 @@ final class Controller {
     private func stopAndSubmit() {
         guard state == .recording else { return }
         toggleMode = false
-        let audio = recorder.end()
+        let captured = recorder.end()
         let micDead = waitLive
         waitLive = false
         releaseMic()
         set(.ready)
-        let dur = Double(audio.count) / 16000
+        let dur = Double(captured.count) / 16000
         guard dur >= Controller.minDuration else { hud.hide(); return }
         if micDead {
             log(String(format: "Диктовка: микрофон не успел включиться за %.1f с (%@) — говорить после звука начала; не ожил и дальше — проверьте вход",
@@ -371,12 +409,21 @@ final class Controller {
             return
         }
         let micNote = recMicDelay.map { String(format: " · микрофон через %.2f с", $0) } ?? ""
-        let peak = audio.reduce(Float(0)) { max($0, abs($1)) }
-        if peak < Controller.silentPeak {
-            log(String(format: "Диктовка: захват пустой (%.1f с, пик %.4f) — проверьте микрофон: %@", dur, peak, recorder.deviceName))
+        // Уровень — программно (MicGain): тихий микрофон подтягивается, пустым считается только мёртвый вход.
+        // peak — пик того, что отдал микрофон, до усиления: он и идёт в журнал.
+        let peak = MicGain.peak(captured)
+        let gainFixed = micGainFixed
+        if MicGain.isEmpty(peak: peak, fixed: gainFixed) {
+            let fixedNote = gainFixed.map { $0 > 1 ? ", усиление " + MicGain.label($0) : "" } ?? ""
+            log(String(format: "Диктовка: захват пустой (%.1f с, пик %.4f%@) — проверьте микрофон: %@%@",
+                       dur, peak, fixedNote, recorder.deviceName, micNote))
             sound("error"); hud.hide()
             return
         }
+        let gain = MicGain.factor(peak: peak, fixed: gainFixed)
+        let audio = MicGain.amplified(captured, by: gain)
+        let gainNote = gain > 1 ? " · усиление " + MicGain.label(gain) : ""
+        let input = Recorder.inputName
         guard asrReady else { hud.hide(); return }
         let engine = self.engine, appleAny = self.appleAny, parakeet = self.parakeet
         hud.setMode(.busy)
@@ -392,7 +439,7 @@ final class Controller {
                 guard let first = spans.first, let last = spans.last else {
                     DispatchQueue.main.async {
                         self.busy -= 1; self.onChange()
-                        log(String(format: "Диктовка: ✗ речи не слышно (%.1f с, пик %.3f — сигнал есть, VAD речь не нашёл) — не вставляю", dur, peak))
+                        log(String(format: "Диктовка: ✗ речи не слышно (%.1f с, пик %.4f%@ — сигнал есть, VAD речь не нашёл) — не вставляю", dur, peak, gainNote))
                         if self.state != .recording { self.hud.hide() }
                         self.sound("error")
                     }
@@ -445,8 +492,9 @@ final class Controller {
             DispatchQueue.main.async {
                 self.busy -= 1; self.onChange()
                 if !cut.isEmpty { log("  ✂ вырезал галлюцинацию: \(cut.joined(separator: ", ").prefix(160))") }
-                log(String(format: "Диктовка: %.1f с звука · asr %.2f с · словарь:%@ · %@ · %d симв.%@",
-                           dur, r.ms / 1000, layer.isEmpty ? "общий" : layer, app, raw.count, micNote))
+                log(String(format: "Диктовка: %.1f с звука · asr %.2f с · словарь:%@ · %@ · %d симв.%@%@",
+                           dur, r.ms / 1000, layer.isEmpty ? "общий" : layer, app, raw.count, micNote, gainNote))
+                if gainFixed == nil { self.learnMicGain(gain, input: input) }  // речь в записи была: VAD её нашёл
                 if self.state != .recording { self.hud.hide() }  // новая запись уже идёт — её капсулу не трогаем
                 self.deliver(raw: raw, hint: hint, app: app, layer: layer, dur: dur, asrMs: r.ms, asrText: r.text, words: r.words, audio: audio)
             }
@@ -1002,7 +1050,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             it.target = self; it.representedObject = p; return it
         }
         let pi = sub(ctl.missingPermissions.isEmpty ? "Разрешения: все выданы" : "Разрешения: не хватает \(ctl.missingPermissions.count)", perms)
-        let micItems = ctl.micOnDemand ? [mic, micWarmMenu()] : [mic]
+        let micItems = (ctl.micOnDemand ? [mic, micWarmMenu()] : [mic]) + [micGainMenu()]
         return sub("Настройки", [hotkeyMenu()] + micItems + [hudMenu(), soundsMenu(), clip, .separator(), ka, login, pi])
     }
 
@@ -1022,6 +1070,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return sub("Держать микрофон после диктовки: \(now)", items)
     }
     @objc func setMicWarm(_ s: NSMenuItem) { if let v = s.representedObject as? Double { ctl.setMicWarm(v) } }
+
+    /// Программное усиление: системный регулятор входа у части USB-микрофонов уже на максимуме, а сигнал тихий.
+    /// «Авто» подтягивает такую запись само; постоянный множитель или «Выключено» — если авто мешает.
+    func micGainMenu() -> NSMenuItem {
+        let fixed = ctl.micGainFixed
+        func item(_ title: String, _ gain: Float?) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: #selector(setMicGain(_:)), keyEquivalent: "")
+            it.target = self; it.representedObject = gain.map { NSNumber(value: $0) }; it.state = fixed == gain ? .on : .off
+            return it
+        }
+        let items = [item("Авто — тихий микрофон подтягивается сам", nil), item("Выключено", 1), .separator()]
+            + MicGain.manual.map { item(MicGain.label($0), $0) }
+        return sub("Усиление микрофона: \(ctl.micGainTitle)", items)
+    }
+    @objc func setMicGain(_ s: NSMenuItem) { ctl.setMicGain((s.representedObject as? NSNumber)?.floatValue) }
 
     @objc func requestMissing() { ctl.requestMissingPermissions() }
     @objc func toggleSounds() { ctl.config.set("sounds", !ctl.config.sounds) }
