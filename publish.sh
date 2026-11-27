@@ -5,10 +5,11 @@
 # Собирать на машине с сертификатом «Dictate Local Signing»: приложения принимают обновление той же подписи.
 set -euo pipefail
 cd "$(dirname "$0")"
+[[ -f .local.env ]] && source .local.env
 VER="$(cat VERSION)"; TAG="v$VER"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "нет тега $TAG — сначала ./release.sh $VER" >&2; exit 1; }
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || { echo "есть незакоммиченные правки" >&2; exit 1; }
-security find-certificate -c "Dictate Local Signing" >/dev/null 2>&1 || { echo "нет сертификата «Dictate Local Signing» — релиз с другой подписью не встанет обновлением" >&2; exit 1; }
+security find-certificate -c "Dictate Local Signing" ${DICTATE_KEYCHAIN:+"$DICTATE_KEYCHAIN"} >/dev/null 2>&1 || { echo "нет сертификата «Dictate Local Signing» — релиз с другой подписью не встанет обновлением" >&2; exit 1; }
 ./build.sh
 PV="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Dictate.app/Contents/Info.plist)"
 [[ "$PV" == "$VER" ]] || { echo "в Info.plist $PV, а VERSION $VER" >&2; exit 1; }
@@ -17,7 +18,6 @@ ditto -c -k --keepParent build/Dictate.app "$ZIP"
 git push -q origin main && git push -q origin "$TAG"
 NOTES="$(awk "/^## \\[$VER\\]/{f=1;next} /^## \\[/{f=0} f" CHANGELOG.md)"
 REPO="$(sed -n 's/.*static let repo = "\(.*\)".*/\1/p' Sources/Dictate/Updater.swift)"
-[[ -f .local.env ]] && source .local.env
 if command -v gh >/dev/null; then
   gh release create "$TAG" "$ZIP" --repo "$REPO" --title "Dictate $VER" --notes-file - <<< "$NOTES"
 elif [[ -n "${GH_SSH:-}" ]]; then

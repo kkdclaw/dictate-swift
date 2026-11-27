@@ -30,6 +30,15 @@ P=$(openssl rand -hex 12); openssl pkcs12 -export -inkey key.pem -in cert.pem -o
 security import id.p12 -k ~/Library/Keychains/login.keychain-db -P $P -T /usr/bin/codesign; rm -f key.pem cert.pem id.p12
 ```
 
+Вторая машина сборки получает **тот же** сертификат (с другим обновление не встанет, а разрешения слетят): на первой — `security export -k ~/Library/Keychains/login.keychain-db -t identities -f pkcs12 -P $P -o id.p12` (выгружает все identity связки — в ней должна быть одна), на второй — отдельная связка: по ssh связка входа заперта («User interaction is not allowed»). `build.sh` и `publish.sh` отпирают её сами по `.local.env`:
+
+```sh
+K=~/Library/Keychains/dictate-signing.keychain-db; KP=$(openssl rand -hex 16)
+security create-keychain -p $KP $K && security set-keychain-settings $K   # без автоблокировки
+security import id.p12 -k $K -P $P -T /usr/bin/codesign && security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $KP $K
+rm -f id.p12; printf 'DICTATE_KEYCHAIN=%s\nDICTATE_KEYCHAIN_PASS=%s\n' $K $KP >> .local.env; chmod 600 .local.env
+```
+
 Удалить: `security delete-identity -c "Dictate Local Signing"`. Сменили сертификат — разрешения выдать заново (старые записи: `tccutil reset Accessibility com.kkd.dictate.mac`, то же для `ListenEvent` и `Microphone`).
 
 ## План

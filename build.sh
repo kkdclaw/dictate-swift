@@ -5,8 +5,11 @@
 # пересборку, потому что macOS узнаёт приложение по сертификату, а не по хэшу сборки. По умолчанию —
 # локальный сертификат «Dictate Local Signing» из связки ключей (создание и удаление — README), другой —
 # DICTATE_SIGN_ID="…". Сертификата нет — ad-hoc (-): после каждой пересборки разрешения выдавать заново.
+# Сертификат в отдельной связке ключей (вторая машина сборки: по ssh связка входа заперта) —
+# DICTATE_KEYCHAIN=<путь> и DICTATE_KEYCHAIN_PASS=<пароль> в .local.env (файл не в git), рецепт — README.
 set -euo pipefail
 cd "$(dirname "$0")"
+[[ -f .local.env ]] && source .local.env
 
 swift build -c release
 
@@ -26,12 +29,14 @@ BUILD="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$APP/Contents/Info.plist"
 
 DEFAULT_ID="Dictate Local Signing"
-if [[ -z "${DICTATE_SIGN_ID:-}" ]] && security find-certificate -c "$DEFAULT_ID" >/dev/null 2>&1; then
+KC="${DICTATE_KEYCHAIN:-}"
+[[ -n "$KC" ]] && security unlock-keychain -p "${DICTATE_KEYCHAIN_PASS:?в .local.env нет DICTATE_KEYCHAIN_PASS}" "$KC"
+if [[ -z "${DICTATE_SIGN_ID:-}" ]] && security find-certificate -c "$DEFAULT_ID" ${KC:+"$KC"} >/dev/null 2>&1; then
   DICTATE_SIGN_ID="$DEFAULT_ID"
 fi
 SIGN="${DICTATE_SIGN_ID:--}"
-codesign --force --sign "$SIGN" "$APP/Contents/Frameworks/whisper.framework"
-codesign --force --sign "$SIGN" "$APP"
+codesign --force --sign "$SIGN" ${KC:+--keychain "$KC"} "$APP/Contents/Frameworks/whisper.framework"
+codesign --force --sign "$SIGN" ${KC:+--keychain "$KC"} "$APP"
 echo "собрано: $APP ($(cat VERSION) · $BUILD, подпись ${DICTATE_SIGN_ID:-ad-hoc})"
 
 if [[ "${1:-}" == "--install" ]]; then
